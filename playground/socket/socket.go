@@ -368,6 +368,17 @@ func (p *process) start(body string, opt *Options) error {
 	}
 	bin := filepath.Join(path, out)
 
+	for _, f := range []string{"go.mod", "go.sum"} {
+		data, err := ioutil.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		err = ioutil.WriteFile(filepath.Join(path, f), data, 0666)
+		if err != nil {
+			return err
+		}
+	}
+
 	// write body to x.go files
 	a := txtar.Parse([]byte(body))
 	if len(a.Comment) != 0 {

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
 	exec "golang.org/x/sys/execabs"
@@ -164,6 +165,96 @@ type process struct {
 	done chan struct{} // closed when wait completes
 	run  *exec.Cmd
 	path string
+}
+
+func readFileDepsList() ([]string, error) {
+	raw, err := ioutil.ReadFile("gopresent.filedeps")
+	if err != nil {
+		// If no deps list, nothing to do.
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		} else {
+			return nil, err
+		}
+	}
+
+	files := make([]string, 0)
+
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") || strings.TrimSpace(line) == "" {
+			// comment line or blank, ignore
+			continue
+		}
+		path := filepath.Clean(line)
+		if isNotALocalFile(path) {
+			continue
+		}
+		files = append(files, path)
+	}
+	return files, nil
+}
+
+// attempt to prevent directory traversal; not thoroughly vetted
+func isNotALocalFile(path string) bool {
+	if path == "." || path == ".." {
+		return true
+	}
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+	if strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return true
+	}
+
+	return false
+}
+
+func (p *process) copyFileDeps() error {
+	tmpPath := p.path
+	if tmpPath == "" {
+		return fmt.Errorf("copyFileDeps: No temp dir defined")
+	}
+
+	fileDepsList, err := readFileDepsList()
+	if err != nil {
+		return err
+	}
+	for _, filename := range fileDepsList {
+		stat, err := os.Stat(filename)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if stat != nil {
+			targetPath := filepath.Join(tmpPath, filename)
+			dir, _ := filepath.Split(targetPath)
+			if dir != "" {
+				os.MkdirAll(dir, 0700)
+			}
+			err = copyFile(filename, targetPath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func copyFile(srcPath string, dstPath string) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	_, err = io.Copy(dst, src)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // startProcess builds and runs the given program, sending its output
@@ -368,15 +459,8 @@ func (p *process) start(body string, opt *Options) error {
 	}
 	bin := filepath.Join(path, out)
 
-	for _, f := range []string{"go.mod", "go.sum"} {
-		data, err := ioutil.ReadFile(f)
-		if err != nil {
-			return err
-		}
-		err = ioutil.WriteFile(filepath.Join(path, f), data, 0666)
-		if err != nil {
-			return err
-		}
+	if err = p.copyFileDeps(); err != nil {
+		return err
 	}
 
 	// write body to x.go files
@@ -391,7 +475,12 @@ func (p *process) start(body string, opt *Options) error {
 		if err != nil {
 			return err
 		}
-		if f.Name == "go.mod" {
+	}
+	stat, err := os.Stat(filepath.Join(path, "go.mod"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	} else {
+		if stat != nil && !stat.IsDir() {
 			hasModfile = true
 		}
 	}
